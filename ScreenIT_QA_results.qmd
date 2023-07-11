@@ -1,0 +1,282 @@
+---
+title: "ScreenIT Quality Assurance Results"
+execute:
+  echo: false
+format: 
+  html:
+    embed-resources: true
+    page-layout: article
+---
+
+## Comparison between COVID preprint analyses with ScreenIT before and after update
+
+The data prior to the update were taken from the latest database. The updated version screenings were done via a different API that only sees the PDFs and no meta-data from the preprint servers. Two hundred preprints were selected for the comparison, but due to bugs in the pipeline, four preprints could not be screened with the updated pipeline, resulting in a total of 196 screened papers.
+
+```{r}
+#| warning: false
+#| message: false
+library(plotly)
+library(tidyverse)
+library(ggpattern)
+library(vroom)
+library(here)
+library(scales)
+# devtools::install_github("https://github.com/davidsjoberg/ggsankey")
+library(ggsankey)
+library(flextable)
+library(readxl)
+
+preprints_200 <- read_excel(here("data", "processed", "preprints_200.xlsx"))
+
+color_palette <- c("#B6B6B6", "#879C9D", "#F1BA50", "#AA493A",
+                   "#303A3E", "#007265", "#634587", "#011638",   
+                   "#DCE3E5", "#000000")
+```
+
+## Sciscore Results
+
+Compared to the previous version, the updated version more often delivered "not required" for the ethics statement, for example for modeling papers. However, this affected all downstream analyses as well, even in the case when there were actually statements related to e.g. randomization, attrition, etc. (@fig-sciscore). In addition, a couple of funding statements were incorrectly detected as ethics statements, attrition had a few false positives, blinding a few false negatives, and power analysis a couple of false positives and one false negative.
+
+```{r}
+#| echo: false
+#| label: fig-sciscore
+#| fig-cap: "Comparison between Sciscore results in the preivous and updated pipeline versions. Only cases where the two versions yielded incongruent results are shown. Cases are also split by the result of the manual validation with true positives shown as solid bars and true negatives shown as striped bars."
+summaries <- preprints_200 |> 
+  filter(assessment %in% c(1, 2)) |> 
+  mutate(truth = case_when(
+    assessment == 1 & value_source_1 == "TRUE" ~ "present",
+    assessment == 2 & value_source_2 == "TRUE" ~ "present",
+    assessment == 1 & value_source_1 == "FALSE" ~ "absent",
+    assessment == 2 & value_source_2 == "FALSE" ~ "absent",
+    .default = NA
+  )) |>
+  drop_na(truth) |> 
+  group_by(field, truth) |> 
+  summarise(updated = sum(assessment == 1),
+          previous = sum(assessment == 2), .groups = "drop") |> 
+  pivot_wider(names_from = truth, values_from = c(updated, previous), values_fill = 0)
+
+sciscore_results <- summaries |> 
+  filter(str_detect(field, "detected|is_modeling"),
+         !str_detect(field, "trial|limitations"))
+
+plot_version_by_truth <- function(tib_truth) {
+  tib_truth |> 
+  plot_ly(x = ~field, y = ~previous_present,
+          name = "previous_true_positives", type = 'bar',
+          marker = list(color = color_palette[7],
+                        line = list(color = 'rgb(0,0,0)',
+                                    width = 1.5))) |> 
+  add_trace(y = ~previous_absent,
+            name = 'previous_true_negatives',
+            marker = list(color = color_palette[7],
+                          pattern = list(shape = "-"),
+              line = list(color = 'rgb(0,0,0)',
+                          width = 1.5)))  |> 
+  add_trace(y = ~updated_present,
+            name = 'updated_true_positives',
+            marker = list(color = color_palette[3],
+                          line = list(color = 'rgb(0,0,0)',
+                                      width = 1.5)))  |> 
+  add_trace(y = ~updated_absent,
+            name = 'updated_true_negatives',
+            marker = list(color = color_palette[3],
+                          pattern = list(shape = "-"),
+              line = list(color = 'rgb(0,0,0)',
+                          width = 1.5)))
+}
+
+
+add_captions <- function(pltly_output, yaxis) {
+  pltly_output |> 
+  layout(barmode = 'stack',
+         legend = list(
+         orientation = "h",
+         legendwidth = 1.3,
+         bgcolor = 'rgba(0,0,0,0)',
+         x = 0.1,
+         y = 1.7),
+         yaxis = list(title = yaxis),
+         xaxis = list(title = '',
+                      dtick = 1),
+         paper_bgcolor = color_palette[9],
+         plot_bgcolor = color_palette[9])  |> 
+  config(displayModeBar = FALSE)
+} 
+ 
+
+sciscore_results |> 
+  plot_version_by_truth() |> 
+  add_captions('<b>Correct calls (out of 196)</b>')
+
+```
+
+## rtransparent Results
+
+A full 100% of preprints in the data set had conflict of interest statements and funding statements, however only some had included these in the pdf of the manuscript (@fig-rtr). As the updated version screened only the pdf input, the manual assessment also was based **only on the text in the pdf**. The updated version of the pipeline missed coi statements if they were named with non-standard names (e.g. "conflicts:" or without section title) or if they were given on the first page of the manuscript.
+
+Similarly, the updated version of the pipeline missed funding statements if they were named with non-standard names (e.g. "financial disclosure", "financing", "funding/support", etc.) or if the funding information was in the acknowledgements. Sometimes statements were missed if they were found on the first page of the pdf (the text screened was missing the first page).
+
+The updated version of the pipeline did not detect registration numbers in 16 cases where the previous version did. The majority (14) of those were correct calls, with the exception of two cases where a PROSPERO registration number was cited but not found in the preprint.
+
+```{r}
+#| echo: false
+#| label: fig-rtr
+#| fig-cap: "Comparison between rtransparent results in the preivous and updated pipeline versions. Only cases where the two versions yielded incongruent results are shown. Cases are also split by the result of the manual validation with true positives shown as solid bars and true negatives shown as striped bars."
+
+summaries |> 
+  filter(str_detect(field, "statement$")) |> 
+  plot_version_by_truth() |> 
+  add_captions('<b>Correct calls (out of 196)</b>')
+
+```
+
+## limitation-recognizer Results
+
+There were only three discrepancies between the previous and updated pipeline versions (@fig-lim). In all three the updated version caught limitations that the previous version did not.
+
+```{r}
+#| echo: false
+#| label: fig-lim
+#| fig-cap: "Comparison between limitation-recognizer results in the preivous and updated pipeline versions. Only cases where the two versions yielded incongruent results are shown. Cases are also split by the result of the manual validation with true positives shown as solid bars and true negatives shown as striped bars."
+
+# lim_plot <- summaries |> 
+#   filter(field == "limitations_detected") |> 
+#     ggplot(aes(field, n, fill = version)) +
+#   geom_col(position = "stack") +
+#   # theme(axis.text.x = element_text(angle = 45)) + 
+#   scale_fill_viridis_d()
+# 
+# lim_plot |> 
+#   ggplotly() |>  
+#     layout(yaxis = list(title = "<b>Correct calls</b>"),
+#            xaxis = list(title = ""),
+#            paper_bgcolor = color_palette[9],
+#            plot_bgcolor = color_palette[9])
+
+summaries |> 
+  filter(field == "limitations_detected") |>
+  plot_version_by_truth() |> 
+  add_captions('<b>Correct calls (out of 196)</b>')
+
+```
+
+## TrialIdentifier Results
+
+The updated version of TrialIdentifier yields several what appear to be false positives (@fig-trn). Some of these are grant numbers or accession numbers given in supplemental tables.
+
+```{r}
+#| echo: false
+#| label: fig-trn
+#| fig-cap: "Comparison between TrialIdentifier results in the preivous and updated pipeline versions. Only cases where the two versions yielded incongruent results are shown. "
+
+# trn_plot <- summaries |> 
+#   filter(field == "trial_n_detected") |> 
+#     ggplot(aes(field, n, fill = version)) +
+#   geom_col(position = "stack") +
+#   # theme(axis.text.x = element_text(angle = 45)) + 
+#   scale_fill_viridis_d()
+# 
+# trn_plot |> 
+#   ggplotly() |>  
+#     layout(yaxis = list(title = "<b>Correct calls</b>"),
+#            xaxis = list(title = ""),
+#            paper_bgcolor = color_palette[9],
+#            plot_bgcolor = color_palette[9])
+
+summaries |> 
+  filter(field == "trial_n_detected") |>
+  plot_version_by_truth() |> 
+  add_captions('<b>Correct calls (out of 196)</b>')
+  
+```
+
+![False positive detection by TrialIdentifier for EUDRA 201501087122.](Trialidentifier.png){fig-align="center"}
+
+## JetFighter Results
+
+The updated JetFighter version detected seven papers that the previous version did not (@fig-jf). In addition, it (falsely?) detected the fluorescent microscopy image shown in @fig-fm.
+
+```{r}
+#| echo: false
+#| label: fig-jf
+#| fig-cap: "Comparison between JetFighter results in the preivous and updated pipeline versions. Only cases where the two versions yielded incongruent results are shown. "
+
+summaries |> 
+  filter(field == "has_jet_pages") |> 
+  plot_version_by_truth() |> 
+  add_captions('<b>Correct calls (out of 196)</b>')
+  
+```
+
+![False positive detection by JetFighter.](FM_rainbow.png){#fig-fm}
+
+## Barzooka Results
+
+In addition to the comparison of the previous and updated version of the pipeline (for all tools listed above), we also compared the performance of Barzooka based on two different types of input: the individually extracted image files during pipeline processing vs. a folder of pdfs with the same preprints. Thus, the main difference was on the level of analysis, either figure-based (Barzooka in pipeline) vs. page-based (stand-alone Barzooka). Two hundred papers were screened with either Barzooka version (pipeline vs. stand-alone) and the cases where there were discrepancies between the two versions were manually validated.
+
+```{r}
+barzooka_preprints_200 <- read_excel(here("data", "processed", "barzooka_preprints_200.xlsx"))
+
+incong_barzooka_200 <- barzooka_preprints_200 |> 
+  filter(assessment %in% c(1, 2))
+  # filter((source_1 == 0 | source_2 == 0) & source_1 != source_2)
+
+n_dois_discrep <- incong_barzooka_200 |> 
+  distinct(doi) |> 
+  nrow()
+
+brz_summaries <- incong_barzooka_200 |> 
+  filter(source_1 == 0 | source_2 == 0) |> 
+  mutate(truth = ifelse(image_count > 0, "present", "absent")) |> 
+  group_by(type, truth) |> 
+  summarise(prop_pipeline = sum(assessment == 1),
+          prop_standalone = sum(assessment == 2), .groups = "drop") |> 
+   pivot_longer(cols = contains("prop"), names_to = "version", values_to = "n") |> 
+  mutate(version = paste0(str_remove(version, "prop_")))
+
+
+```
+
+Discrepancies between the two Barzooka versions on the presence or absence of a figure type were detected in `r n_dois_discrep` out of 200 papers, with discrepancies found for all figure types (Fig. @fig-brz).
+
+```{r}
+#| echo: false
+#| label: fig-brz
+#| fig-cap: "Comparison between Barzooka results from the stand-alone (yellow) and pipeline (purple) versions. Only cases where the two versions yielded incongruent results are shown. Cases are also split by the result of the manual validation with true positives shown as solid bars and true negatives shown as striped bars."
+
+brz_by_truth <- brz_summaries |> 
+  pivot_wider(names_from = truth, values_from = n) |> 
+  pivot_wider(names_from = version, values_from = c(absent, present))
+
+plot_output <- brz_by_truth |> 
+  plot_ly(x = ~type, y = ~present_pipeline,
+          name = "pipeline_true_positives", type = 'bar',
+          marker = list(color = color_palette[7],
+                        line = list(color = 'rgb(0,0,0)',
+                                    width = 1.5))) |> 
+  add_trace(y = ~absent_pipeline,
+            name = 'pipeline_true_negatives',
+            marker = list(color = color_palette[7],
+                          pattern = list(shape = "-"),
+              line = list(color = 'rgb(0,0,0)',
+                          width = 1.5)))  |> 
+  add_trace(y = ~present_standalone,
+            name = 'standalone_true_positives',
+            marker = list(color = color_palette[3],
+                          line = list(color = 'rgb(0,0,0)',
+                                      width = 1.5)))  |> 
+  add_trace(y = ~absent_standalone,
+            name = 'standalone_true_negatives',
+            marker = list(color = color_palette[3],
+                          pattern = list(shape = "-"),
+              line = list(color = 'rgb(0,0,0)',
+                          width = 1.5)))
+
+plot_output |> 
+  add_captions('<b>Correct calls (out of 200)</b>')
+
+
+```
+
+For most categories, especially "approp", "bardot", "dot", and "pie", the stand-alone version generally delivered better results (Fig. @fig-brz). Thus, this is the recommended use of the tool and the application on extracted separate image files is to be avoided. For the stand-alone version, the occasional errors in the "bar" and "approp" categories were due to proportional data not recognized as such or histograms or bardots were miss-classified. It also more readily detected "hist" images compared to the pipeline version, although some of these detections were false-positives. There were no false negatives and only a few false positives for the "dot" and "bardot" categories, with commonly missidentified dots with whiskers, scatter plots or "bardots" with barely any bars visible. Similarly, many densely-packed dotplots or boxplots were mistaken for "violin" plots. Finally, there were several gene structure schematics and symbol-whisker plots with large squares that were mistakenly classified as "box".

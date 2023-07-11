@@ -1,0 +1,529 @@
+---
+title: "COVID_preprints"
+execute:
+  echo: false
+format: 
+  html:
+    embed-resources: true
+    page-layout: article
+---
+
+## COVID Preprint Screening Results
+
+```{r}
+#| warning: false
+
+library(plotly)
+library(tidyverse)
+library(vroom)
+library(here)
+library(scales)
+library(ggsankey)
+library(flextable)
+
+nondetection_string <- "^no.*ed."
+
+preprints <- vroom(here("data", "raw", "preprints.csv")) %>%
+  filter(!is.na(publication_date),
+         publication_date < "2022-07-01") %>%
+  # due to multiple variants of "not required.", "no trequired." etc. remove space
+  mutate(across(contains("value"), ~ifelse(str_length(.) < 16, str_remove_all(., " "), .))) %>% 
+  mutate(across(contains("statement"), as.logical)) %>% 
+  mutate(limitations_detected = limitations > 0,
+         has_jet_pages = jet_pages > 0,
+         randomization_detected = ifelse(str_detect(label2, "Rand"), value2, value6),
+         randomization_required = !str_detect(randomization_detected, "notrequired."),
+         randomization_detected = !str_detect(randomization_detected, nondetection_string),
+         blinding_detected = ifelse(str_detect(label3, "Blind"), value3, value7),
+         blinding_required = !str_detect(blinding_detected, "notrequired."),
+         blinding_detected = !str_detect(blinding_detected, nondetection_string),
+         ethics_statement_detected = !is.na(ethics_title1),
+         ethics_statement_required = !str_detect(ethics_value1, "notrequired."),
+         # is_human_study = str_detect(),
+         # is_animal_study = str_detect(value1, "[A,a]nimals*|[M,m]ouse|[M,m]ice|[D,d]og|[M,m]onkey|[M,m]osquito|[H,h]amster|[M,m]acaque|ARRIVE|AWERB|CULATR|[V,v]eterin|IACUC"),
+         # is_human_study = str_detect(value1, "(?<![N,n]on)[H,h]umans*(?!e)|[P,p]atient|[I,i]nformed|[C,c]onsent|[V,v]oluntary|[V,v]olunteers*|[P,p]erson(?!nel)|[P,p]articip.*|[P,p]eople|[C,c]linical|CONSORT|ICREC|IRB|[R,r]eview [B,b]oard|[I,i]nstitutional [R,r]eview|[E,e]thic.*[C,c]om+it+e+|[E,e]thic.*[B,b]oard|[E,e]thic[s,a]l*.*[C,c]om+is+ion|[B,b]iosafety|approval numbers*|Declaration of Helsinki|[H,h]ealth [A,a]uthority"),
+         power_analysis_detected = ifelse(str_detect(label4, "Power"), value4, value8),
+         power_analysis_required = !str_detect(power_analysis_detected, "notrequired."),
+         power_analysis_detected = !str_detect(power_analysis_detected, nondetection_string),
+         sex_variable_detected = ifelse(str_detect(label4, "Sex"), value4, value5),
+         sex_variable_required = !str_detect(sex_variable_detected, "notrequired."),
+         sex_variable_detected = !str_detect(sex_variable_detected, nondetection_string),
+         inclusion_criteria_detected = ifelse(str_detect(label2, "Inclusion"), value2, NA_character_),
+         inclusion_criteria_required = !str_detect(inclusion_criteria_detected, "notrequired."),
+         inclusion_criteria_detected = !str_detect(inclusion_criteria_detected, nondetection_string),
+         attrition_detected = ifelse(str_detect(label3, "Attrition"), value3, NA_character_),
+         attrition_required = !str_detect(attrition_detected, "notrequired."),
+         attrition_detected = !str_detect(attrition_detected, nondetection_string),
+         subject_demographics_detected = ifelse(str_detect(label5, "Subject"), value5, NA_character_),
+         subject_demographics_required = !str_detect(subject_demographics_detected, "notrequired."),
+         subject_demographics_detected = !str_detect(subject_demographics_detected, nondetection_string),
+         cla_detected = ifelse(str_detect(label6, "Cell"), value6, NA_character_),
+         cla_required = !str_detect(cla_detected, "notrequired."),
+         cla_detected = !str_detect(cla_detected, nondetection_string))
+
+preprints <- preprints %>%
+  rowwise() %>%
+  mutate(ethics_titles = paste(c(ethics_title1, ethics_title2, ethics_title3), collapse = ","),
+         has_consent = str_detect(ethics_titles, "Consent"),
+         has_IRB = str_detect(ethics_label, "IRB"),
+         has_IRB_or_consent = has_IRB | has_consent,
+         is_animal_study = str_detect(ethics_titles, "IACUC|Euthanasia") |
+           str_detect(ethics_value1, "[A,a]nimals*|[V,v]eterin"),
+         has_IRB_only = str_detect(ethics_titles, "IRB,NA,NA") &
+           is_animal_study == FALSE) %>%
+  select(contains("ethics"), has_IRB_only, has_consent, has_IRB_or_consent, is_animal_study, everything()) %>%
+  ungroup()
+
+
+plot_prop <- function(tib, col, datecol, resolution = c("monthly", "quarterly"), split = FALSE, splitcol = NULL, splitdatefilter = NULL, legend.x =  0.05, legend.y = 0.85) {
+  resolution <- match.arg(resolution)
+  # 
+  if (split == TRUE) {
+    n_notrequired <- tib %>%
+      filter({{ splitcol }}) %>%
+      nrow()
+  } else {
+    n_notrequired = 0
+  }
+  
+
+   
+  if (resolution == "quarterly") {
+    tib <- tib %>%
+      mutate(date = quarter( {{ datecol }} , type = "date_first" ))
+  } else {
+    tib <- tib %>%
+      mutate(date = floor_date( {{ datecol }} , "month" ))
+  }
+   
+  overall_value <- tib %>%
+    summarise(overall = (mean( {{ col }} , na.rm = TRUE) * 100 ) %>%
+                round(2)) %>%
+    pull(overall) %>%
+    paste0("%")
+  overall_value <- paste(" =\n", overall_value)
+
+  label_par <- rlang::ensym(col) %>% as.character()
+
+  
+  
+  pl <- tib %>%
+    group_by(date) %>%
+    summarise({{ col }} := mean({{ col }} , na.rm = TRUE) %>% round(2),
+              n = n()) %>%
+    mutate(n = paste("n:", n)) %>%
+    ggplot() +
+    geom_line(aes(date, {{ col }}, group = 1, text = n, color = 'total screened')) +
+    geom_point(aes(date, {{ col }}, group = 1, text = n, color = 'total screened'), size = 1) +
+    scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+    theme(plot.margin = unit(c(1,1,1,1), "cm"))
+
+  cols <- c(color_palette[7], "darkorange")
+  
+  if (n_notrequired > 0 & split == TRUE) {
+    
+    sub_tib <- tib
+    
+    if (!is.null(splitdatefilter)) {
+      sub_tib <- tib %>% 
+        filter(date >= splitdatefilter)
+    }
+
+    req_tib <- sub_tib %>% 
+      filter({{ splitcol }} == TRUE) %>%
+      group_by(date) %>%
+      summarise(subset_perc = (mean( {{ col }} , na.rm = TRUE)) %>%
+                  round(2),
+                n = n()) %>%
+      mutate(n = paste("n:", n))
+    
+
+    
+    overall_req_value <- sub_tib %>%
+      filter({{ splitcol }} == TRUE) %>%
+      summarise(overall = (mean( {{ col }} , na.rm = TRUE) * 100 ) %>%
+                  round(2)) %>%
+      pull(overall) %>%
+      paste0("%")
+    
+    subset_label <- rlang::ensym(splitcol) %>% as.character()
+    cols <- rev(cols) 
+    
+    overall_value <- paste(overall_value, "For subset =",
+                           overall_req_value)
+    
+    pl <- pl +
+      geom_line(data = req_tib, aes(date, subset_perc, group = 1, text = n, color = subset_label)) +
+      geom_point(data = req_tib, aes(date, subset_perc, group = 1, text = n, color = subset_label), size = 1) 
+    
+  }
+
+  pl <- pl +
+    labs(title = paste(as.character(label_par), overall_value)) +
+    scale_color_manual(name='Subset of preprints',
+                       values = cols) +
+    theme(legend.background = element_rect(fill = color_palette[9], 
+                                           linetype = "solid"),
+          plot.title = element_text(size = 10))
+  
+  pl %>%
+    ggplotly() %>%
+    layout(yaxis = list(title = '<b>Preprints</b>',
+                        ticksuffix = "%"),
+           xaxis = list(title = '<b>Date</b>'),
+           paper_bgcolor = color_palette[9],
+           plot_bgcolor = color_palette[9],
+           legend = list(orientation = 'v', x = legend.x, y = legend.y))
+
+  
+}
+
+color_palette <- c("#B6B6B6", "#879C9D", "#F1BA50", "#AA493A",
+                   "#303A3E", "#007265", "#634587", "#011638",   
+                   "#DCE3E5", "#000000")
+
+show_col(color_palette)
+
+# preprints %>%
+#   plot_prop(sex_variable_detected, publication_date, "quarterly", split = TRUE, sex_variable_required)
+
+
+
+
+sciscore_change_date <- preprints %>% 
+  filter(!str_detect(ethics_label, "Ethics")) %>% 
+  summarise(max_date = max(publication_date, na.rm = TRUE)) %>% 
+  pull() %>% 
+  format("%d.%m.%Y")
+
+barzooka_change_date <- preprints %>% 
+  filter(!is.na(approp)) %>% 
+  summarise(min_date = min(publication_date, na.rm = TRUE)) %>% 
+  pull() %>% 
+  format("%d.%m.%Y")
+
+n_preprints <- preprints$doi %>% unique() %>% length()
+
+```
+
+Here is a quick overview of some variables of interest. Database downloaded on 28.10.2022.
+
+Only data for screened preprints (`report_exists = TRUE`, n = `r n_preprints`) are presented here.
+
+There was a peak in the number of screened preprints early in 2020 and a steady decline afterwards. A very small number of preprints were screened after June 2022. Therefore data were truncated after 30.06.2022.
+
+```{r}
+#| warning: false
+
+quarterly_n_preprints <- preprints %>% 
+  mutate(date = quarter(publication_date, type = "date_first")) %>% 
+  count(date) %>% 
+  ggplot(aes(date, n)) +
+  geom_col(fill = color_palette[6])
+
+quarterly_n_preprints %>% 
+  ggplotly() %>% 
+    layout(yaxis = list(title = '<b>Quarterly number of preprints</b>'),
+           xaxis = list(title = '<b>Date</b>'),
+           paper_bgcolor = color_palette[9],
+           plot_bgcolor = color_palette[9])
+
+```
+
+```{r}
+#| warning: false
+
+monthly_n_preprints <- preprints %>% 
+  mutate(date = floor_date(publication_date , "month" )) %>% 
+  count(date) %>% 
+  ggplot(aes(date, n)) +
+  geom_col(fill = color_palette[6])
+
+monthly_n_preprints %>% 
+  ggplotly() %>% 
+    layout(yaxis = list(title = '<b>Monthly number of preprints</b>'),
+           xaxis = list(title = '<b>Date</b>'),
+           paper_bgcolor = color_palette[9],
+           plot_bgcolor = color_palette[9])
+```
+
+Changes in SciScore results are visible after `r sciscore_change_date`, with some categories missing before (e.g. *Attrition*) or after (*Cell Line Authentication,* `cla_detected`). The category *Ethics* (from before 2021) was taken as equivalent to *Institutional Review Board Statement* (after 2021), and shown as `ethics_statement_detected` below. There was also an additional output added to all SciScore results after `r sciscore_change_date`, `not required`. Removing the entries with this output usually improves the overall scores, but it causes a jump in the numbers as can be seen in the gold lines below. Recommendation: cut-off the data before this change for these plots as well.
+
+```{r}
+#| layout-ncol: 2
+#| warning: false
+
+preprints %>% 
+  plot_prop(is_open_data, publication_date, "quarterly") 
+
+preprints %>% 
+  plot_prop(is_open_code, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(trial_n_detected, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(is_modeling_paper, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(coi_statement, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(funding_statement, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(registration_statement, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(limitations_detected, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(has_jet_pages, publication_date, "quarterly")
+
+preprints %>% 
+  plot_prop(ethics_statement_detected, publication_date, "quarterly", split = TRUE, ethics_statement_required, splitdatefilter = "2021-07-01")
+
+preprints %>% 
+  plot_prop(randomization_detected, publication_date, "quarterly", split = TRUE, randomization_required, splitdatefilter = "2021-04-01")
+
+preprints %>% 
+  plot_prop(blinding_detected, publication_date, "quarterly", split = TRUE, blinding_required, splitdatefilter = "2021-04-01")
+
+preprints %>% 
+  plot_prop(power_analysis_detected, publication_date, "quarterly", split = TRUE, power_analysis_required, splitdatefilter = "2021-04-01")
+
+preprints %>% 
+  plot_prop(sex_variable_detected, publication_date, "quarterly", split = TRUE, sex_variable_required, splitdatefilter = "2021-04-01")
+
+preprints %>%
+    mutate(
+    inclusion_criteria_detected = ifelse(publication_date >= "2021-04-01",
+                                           inclusion_criteria_detected, NA)
+    ) %>%
+  plot_prop(inclusion_criteria_detected, publication_date, "quarterly", split = TRUE, inclusion_criteria_required, splitdatefilter = TRUE)
+
+preprints %>% 
+  mutate(
+    attrition_detected = ifelse(publication_date >= "2021-04-01",
+                                attrition_detected, NA)
+    ) %>% 
+  plot_prop(attrition_detected, publication_date, "quarterly", split = TRUE,
+            attrition_required, splitdatefilter = TRUE)
+
+preprints %>% 
+  mutate(
+    subject_demographics_detected = ifelse(publication_date >= "2021-04-01",
+                                           subject_demographics_detected, NA)
+    ) %>%
+  plot_prop(subject_demographics_detected, publication_date, "quarterly", split = TRUE, subject_demographics_required, splitdatefilter = TRUE)
+
+preprints %>% 
+  plot_prop(cla_detected, publication_date, "quarterly")
+```
+
+Subgroups of interest in the original publication were the preprints with an animal or human ethics statements. The detection of these is not straightforward, but using regular expressions in the ethics statements detected, the classification into animal and human studies is shown below. This is for data after the change in the SciScore classification described above. Not that that classification categories are not mutually exclusive, but there are a small number of studies that are both human and animal, or animal and modeling, etc.
+
+```{r}
+#| warning: false
+
+freqs <- preprints %>% 
+  filter(str_detect(ethics_label, "Ethic")) %>% 
+  mutate(ethics_not_detected = str_detect(ethics_value1, "notdetected."),
+         ethics_not_required = str_detect(ethics_value1, "notrequired."),
+         Detection = case_when(
+           ethics_not_required == TRUE ~ "Ethics statement not required.",
+           ethics_not_detected == TRUE ~ "Ethics statement not detected.",
+           TRUE ~ "Ethics statement detected."
+         )) %>% 
+  count(Detection, is_modeling_paper, is_animal_study, has_IRB_or_consent)
+
+detection_subtotals <- freqs %>% 
+  count(Detection, wt = n) %>% 
+  mutate(perc = round(n/sum(n) * 100, 2))
+
+freqs <- freqs %>% 
+  mutate(Screening = paste("Preprints screened\n", sum(n)),
+         Classification = case_when(
+           # is_human_study & is_animal_study & is_modeling_paper ~ "human, animal & model",
+           # is_human_study & is_animal_study ~ "human & animal",
+           # is_human_study & is_modeling_paper ~ "human & modeling",
+           # is_animal_study & is_modeling_paper ~ "animal & modeling",
+           # is_human_study ~ "human only",
+           # is_animal_study ~ "animal only",
+           # is_modeling_paper ~ "modeling only",
+           # TRUE ~ "unclear"
+           has_IRB_or_consent ~ "human",
+           is_animal_study ~ "animal",
+           is_modeling_paper ~ "modeling",
+           TRUE ~ "unclear"
+         ))
+
+classification_subtotals <- freqs %>% 
+  count(Classification, wt = n) %>% 
+  mutate(perc = round(n/sum(n) * 100, 2))
+
+freqs %>% 
+  make_long(Screening, Detection, Classification, value = n) %>% 
+  ggplot(aes(x = x, next_x = next_x, node = node, next_node = next_node,
+                 # fill = factor(node), label = node)) +
+                 fill = factor(node), value = value, label = node)) +
+  geom_sankey(flow.alpha = .6,
+              node.color = "gray30", width = 0.2) +
+  geom_sankey_label(size = 3, color = "white", fill = "gray40") +
+  scale_fill_viridis_d() +
+  theme_sankey(base_size = 18) +
+  labs(x = NULL) +
+  theme(legend.position = "none")
+
+
+detection_subtotals %>% 
+  flextable()
+
+classification_subtotals %>% 
+  flextable()
+
+# freqs %>%
+#   filter(!str_detect(Detection, "not"))
+
+```
+
+```{r}
+#| layout-ncol: 2
+#| warning: false
+
+preprints %>% 
+  plot_prop(sex_variable_detected, publication_date, "quarterly", split = TRUE, ethics_statement_detected)
+
+preprints %>% 
+  plot_prop(power_analysis_detected, publication_date, "quarterly", split = TRUE, ethics_statement_detected)
+
+preprints %>% 
+  plot_prop(randomization_detected, publication_date, "quarterly", split = TRUE, ethics_statement_detected)
+
+preprints %>% 
+  plot_prop(blinding_detected, publication_date, "quarterly", split = TRUE, ethics_statement_detected)
+```
+
+```{r}
+
+sciscores <- preprints %>%
+  mutate(date = quarter(publication_date, type = "date_first")) %>% 
+  count(date, sciscore) %>% 
+  group_by(date) %>% 
+  mutate(total = sum(n),
+         perc = round(n/total * 100, 1),
+         sciscore = factor(sciscore))
+  
+
+sciscores %>% 
+   plot_ly(x = ~date, y = ~perc, type = 'bar', 
+          name = ~sciscore, color = ~sciscore,
+          colors = color_palette,
+          marker = list(line = list(color = 'rgb(0,0,0)',
+                                        width = 1.5))) %>%
+  layout(xaxis = list(title = '<b>Date</b>'),
+         yaxis = list(title = '<b>SciScore scores</b>',
+                      range = c(0, 100),
+                      ticksuffix = "%"),
+         barmode = 'stack',
+         paper_bgcolor = color_palette[9],
+         plot_bgcolor = color_palette[9])
+```
+
+Barzooka's results also changed from graph_types {"bar", "pie", "hist", "bardot", "box", "dot", "violin"} to {"approp", "bar", "bardot", "box", "dot", "flowno", "flowyes", "hist", "other", "pie", "text", "violin"} after `r barzooka_change_date`. Unfortunately, after this change every single result is 0, indicating a problem with the tool from that time point onwards (see below).
+
+```{r}
+#| warning: false
+
+plot_barzooka_problem_perc <- function(plot_data, color_palette)
+{
+  overall_bar <- plot_data %>% 
+    summarise(total = sum(total), has_bar = sum(has_bar)) %>% 
+    mutate(perc_bar = has_bar / total * 100) %>% 
+    pull(perc_bar) %>% 
+    round(2) %>% 
+    paste("%")
+  
+  plot_ly(plot_data, x = ~date, y = ~round(has_bar/total*100, 1),
+          name = "bar graph", type = 'scatter', mode = 'lines+markers',
+          line = list(color = color_palette[2], width = 3),
+          marker = list(color = color_palette[2], size = 8)) %>%
+    add_trace(y = ~round(has_pie/total*100, 1), name = 'pie chart', mode = 'lines+markers',
+              line = list(color = color_palette[3]),
+              marker = list(color = color_palette[3])) %>%
+    layout(title = paste("has_bar = ", overall_bar),
+           yaxis = list(title = '<b>Preprints</b>',
+                        range = c(0, 28),
+                        ticksuffix = "%"),
+           xaxis = list(title = '<b>Date</b>'),
+           paper_bgcolor = color_palette[9],
+           plot_bgcolor = color_palette[9])
+}
+
+plot_barzooka_inform_perc <- function(plot_data, color_palette)
+{
+  
+  overall_info <- plot_data %>% 
+    summarise(total = sum(total), has_informative = sum(has_informative)) %>% 
+    mutate(perc_info = has_informative / total * 100) %>% 
+    pull(perc_info) %>% 
+    round(2) %>% 
+    paste("%")
+  
+  plot_ly(plot_data, x = ~date, y = ~round(has_informative/total*100, 1),
+          name = "any informative", type = 'scatter', mode = 'lines+markers',
+          line = list(color = color_palette[1], width = 3),
+          marker = list(color = color_palette[1], size = 8)) %>%
+    add_trace(y = ~round(has_bardot/total*100, 1), name = 'bar graph with dots', mode = 'lines+markers',
+              line = list(color = color_palette[2]),
+              marker = list(color = color_palette[2])) %>%
+    add_trace(y = ~round(has_box/total*100, 1), name = 'box plot', mode = 'lines+markers',
+              line = list(color = color_palette[3]),
+              marker = list(color = color_palette[3])) %>%
+    add_trace(y = ~round(has_dot/total*100, 1), name = 'dot plot', mode = 'lines+markers',
+              line = list(color = color_palette[4]),
+              marker = list(color = color_palette[4])) %>%
+    add_trace(y = ~round(has_hist/total*100, 1), name = 'histogram', mode = 'lines+markers',
+              line = list(color = color_palette[6]),
+              marker = list(color = color_palette[6])) %>%
+    add_trace(y = ~round(has_violin/total*100, 1), name = 'violin plot', mode = 'lines+markers',
+              line = list(color = color_palette[7]),
+              marker = list(color = color_palette[7])) %>%
+    layout(title = paste("has_informative = ", overall_info),
+           yaxis = list(title = '<b>Preprints</b>',
+                        range = c(0, 28),
+                        ticksuffix = "%"),
+           xaxis = list(title = '<b>Date</b>'),
+           paper_bgcolor = color_palette[9],
+           plot_bgcolor = color_palette[9])
+}
+
+```
+
+```{r}
+barzooka_data <- preprints %>% 
+  filter(publication_date < "2022-01-01") %>%
+  mutate(date = quarter(publication_date, type = "date_first")) %>% 
+  group_by(date) %>%
+  summarize(total = n(),
+            has_bar = sum(bar > 0, na.rm = TRUE),
+            has_pie = sum(pie > 0, na.rm = TRUE),
+            has_bardot = sum(bardot > 0, na.rm = TRUE),
+            has_box = sum(box > 0, na.rm = TRUE),
+            has_dot = sum(dot > 0, na.rm = TRUE),
+            has_hist = sum(hist > 0, na.rm = TRUE),
+            has_violin = sum(violin > 0, na.rm = TRUE),
+            has_informative = sum(bardot > 0 | box > 0 | dot > 0 | hist > 0 | violin > 0,  na.rm = TRUE)) 
+
+
+barzooka_data %>% 
+  plot_barzooka_problem_perc(color_palette)
+
+barzooka_data %>% 
+  plot_barzooka_inform_perc(color_palette)
+  
+```
+
+TODO:
+
+Extract retracted papers from citations and calculate proportion of preprints citing retracted papers. Important to note that the retractions were detected at time of screening.
